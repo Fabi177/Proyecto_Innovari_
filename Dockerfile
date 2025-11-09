@@ -85,7 +85,6 @@ exec apache2-foreground' > /docker-entrypoint.sh && chmod +x /docker-entrypoint.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD curl -f http://localhost/health || curl -f http://localhost/ || exit 1
 
+# Al final, reemplaza todo el script por:
 EXPOSE 80
-
-# Usar el script de inicio
-CMD ["/docker-entrypoint.sh"]
+CMD ["apache2-foreground"]
