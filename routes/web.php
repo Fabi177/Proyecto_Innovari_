@@ -8,6 +8,21 @@ use App\Http\Controllers\AntecedentesFamiliaresController;
 use App\Http\Controllers\AntecedentesPersonalesController;
 use App\Http\Controllers\ParametrosAntropometricosController;
 use App\Http\Controllers\SignosVitalesController;
+Route::get('/health', function () {
+    try {
+        \DB::connection()->getPdo();
+        $dbStatus = 'connected';
+    } catch (\Exception $e) {
+        $dbStatus = 'disconnected';
+    }
+
+    return response()->json([
+        'status' => $dbStatus === 'connected' ? 'healthy' : 'unhealthy',
+        'service' => 'laravel-innovari',
+        'database' => $dbStatus,
+        'timestamp' => now()->toIso8601String()
+    ], $dbStatus === 'connected' ? 200 : 503);
+});
 
 Route::get('/paciente/buscar', [PacienteController::class, 'buscarPorNombre'])->name('paciente.buscarPorNombre');
 Route::get('/pacientes', [PacienteController::class, 'index'])->name('pacientes.index');
