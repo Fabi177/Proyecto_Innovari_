@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8000:80"
+      - "8081:80"  # Cambiado de 8080 a 8081
     environment:
       - APP_ENV=local
       - APP_DEBUG=true
@@ -16,15 +16,17 @@ services:
       - DB_PASSWORD=secret
     volumes:
       - ./storage:/var/www/html/storage
+      - ./bootstrap/cache:/var/www/html/bootstrap/cache
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     networks:
       - laravel
 
   mysql:
     image: mysql:8.0
     ports:
-      - "3306:3306"
+      - "3307:3306"  # Puerto externo 3307 para evitar conflictos
     environment:
       MYSQL_DATABASE: laravel
       MYSQL_USER: laravel
@@ -32,6 +34,11 @@ services:
       MYSQL_ROOT_PASSWORD: root
     volumes:
       - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - laravel
 

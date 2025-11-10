@@ -1,83 +1,64 @@
-# --- Vendor stage: usar PHP 8.2 para composer (coincide con composer.lock / laravel v11) ---
-FROM php:8.2-cli AS vendor
+# Usar PHP 8.2 con Apache (más simple y sin problemas de repos)
+FROM php:8.2-apache
 
-ENV DEBIAN_FRONTEND=noninteractive
-WORKDIR /app
-
-# Dependencias necesarias para compilar extensiones y usar composer
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-    git \
-    unzip \
-    zip \
-    ca-certificates \
-    pkg-config \
-    libzip-dev \
-    libicu-dev \
-    libonig-dev \
-    libpng-dev \
-    libjpeg-dev \
-    libfreetype6-dev \
-    zlib1g-dev \
- && rm -rf /var/lib/apt/lists/*
-
-# Instalar Composer
-RUN php -r "copy('https://getcomposer.org/installer','composer-setup.php');" \
- && php composer-setup.php --install-dir=/usr/local/bin --filename=composer \
- && rm composer-setup.php
-
-# Copiar sólos los archivos de composer para usar layer cache
-COPY composer.json composer.lock ./
-
-# Ejecutar composer con PHP 8.2 (coincide con los requisitos del lockfile)
-RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
-
-# --- Node builder (assets frontend) ---
-FROM node:18 AS node_builder
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --silent
-COPY . .
-RUN npm run build
-
-# --- Image final: php-fpm 8.2 runtime ---
-FROM php:8.2-fpm
-
-ENV DEBIAN_FRONTEND=noninteractive
+# Establecer directorio de trabajo
 WORKDIR /var/www/html
 
-# Instalar librerías necesarias en runtime (y para extensiones)
-RUN apt-get update \
- && apt-get install -y --no-install-recommends \
-    libzip-dev \
-    libicu-dev \
-    libonig-dev \
+# Instalar dependencias usando imágenes base sin problemas de repositorios
+RUN apt-get update && \
+    apt-get install -y \
+    git \
+    curl \
     libpng-dev \
-    libjpeg-dev \
-    libfreetype6-dev \
-    zlib1g-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
     unzip \
- && docker-php-ext-configure gd --with-freetype --with-jpeg \
- && docker-php-ext-install -j$(nproc) pdo_mysql zip intl mbstring exif pcntl bcmath gd \
- && rm -rf /var/lib/apt/lists/*
+    libzip-dev \
+    libfreetype6-dev \
+    libjpeg62-turbo-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copiar vendor (ya instalado en etapa vendor)
-COPY --from=vendor /app/vendor ./vendor
-COPY --from=vendor /app/composer.lock ./composer.lock
-COPY --from=vendor /usr/local/bin/composer /usr/local/bin/composer
+# Habilitar mod_rewrite de Apache
+RUN a2enmod rewrite
 
-# Copiar aplicación
+# Copiar configuración de Apache para Laravel
+RUN echo '<VirtualHost *:80>\n\
+    DocumentRoot /var/www/html/public\n\
+    <Directory /var/www/html/public>\n\
+        AllowOverride All\n\
+        Require all granted\n\
+    </Directory>\n\
+    ErrorLog ${APACHE_LOG_DIR}/error.log\n\
+    CustomLog ${APACHE_LOG_DIR}/access.log combined\n\
+</VirtualHost>' > /etc/apache2/sites-available/000-default.conf
+
+# Instalar Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Copiar archivos del proyecto
 COPY . .
 
-# Copiar assets compilados desde node_builder (ajusta ruta según tu build)
-COPY --from=node_builder /app/public ./public
+# Crear directorios necesarios
+RUN mkdir -p storage/framework/sessions \
+    storage/framework/views \
+    storage/framework/cache \
+    storage/logs \
+    bootstrap/cache
 
-# Permisos (ajusta según tu entorno)
+# Instalar dependencias de Composer
+RUN composer install --no-dev --optimize-autoloader --no-interaction || true
+
+# Establecer permisos
 RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html/storage /var/www/html/bootstrap/cache || true
+    && chmod -R 775 /var/www/html/storage \
+    && chmod -R 775 /var/www/html/bootstrap/cache
 
-ENV APP_ENV=production
-ENV APP_DEBUG=false
+# Exponer puerto 80
+EXPOSE 80
 
-EXPOSE 9000
-CMD ["php-fpm"]
+# Comando de inicio
+CMD ["apache2-foreground"]
