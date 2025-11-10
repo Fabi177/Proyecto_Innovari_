@@ -1,16 +1,17 @@
-# --- Vendor stage: usar PHP 8.1 para composer (garantiza compatibilidad con composer.lock) ---
-FROM php:8.1-cli AS vendor
+ url=https://github.com/Fabi177/Proyecto_Innovari_/blob/main/Dockerfile
+# --- Vendor stage: usar PHP 8.2 para composer (coincide con composer.lock / laravel v11) ---
+FROM php:8.2-cli AS vendor
 
 ENV DEBIAN_FRONTEND=noninteractive
-
 WORKDIR /app
 
-# Dependencias del sistema necesarias para composer y para compilar extensiones PHP
+# Dependencias necesarias para compilar extensiones y usar composer
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     git \
     unzip \
     zip \
+    ca-certificates \
     pkg-config \
     libzip-dev \
     libicu-dev \
@@ -26,32 +27,29 @@ RUN php -r "copy('https://getcomposer.org/installer','composer-setup.php');" \
  && php composer-setup.php --install-dir=/usr/local/bin --filename=composer \
  && rm composer-setup.php
 
-# Copiar composer files primero (cache layer)
+# Copiar sólos los archivos de composer para usar layer cache
 COPY composer.json composer.lock ./
 
-# Instalar dependencias sin dev (esto se ejecuta con PHP 8.1 y con libicu disponible)
+# Ejecutar composer con PHP 8.2 (coincide con los requisitos del lockfile)
 RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
 
 # --- Node builder (assets frontend) ---
 FROM node:18 AS node_builder
 WORKDIR /app
-
 COPY package.json package-lock.json ./
 RUN npm ci --silent
-
 COPY . .
 RUN npm run build
 
-# --- Final runtime: php-fpm 8.1 ---
-FROM php:8.1-fpm
+# --- Image final: php-fpm 8.2 runtime ---
+FROM php:8.2-fpm
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /var/www/html
 
-# Instalar en la imagen final las mismas dependencias necesarias para docker-php-ext-install
+# Instalar librerías necesarias en runtime (y para extensiones)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-    pkg-config \
     libzip-dev \
     libicu-dev \
     libonig-dev \
@@ -64,7 +62,7 @@ RUN apt-get update \
  && docker-php-ext-install -j$(nproc) pdo_mysql zip intl mbstring exif pcntl bcmath gd \
  && rm -rf /var/lib/apt/lists/*
 
-# Copiar vendor optimizado desde la etapa vendor
+# Copiar vendor (ya instalado en etapa vendor)
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=vendor /app/composer.lock ./composer.lock
 COPY --from=vendor /usr/local/bin/composer /usr/local/bin/composer
@@ -72,10 +70,10 @@ COPY --from=vendor /usr/local/bin/composer /usr/local/bin/composer
 # Copiar aplicación
 COPY . .
 
-# Copiar assets compilados desde node_builder (ajusta ruta si necesario)
+# Copiar assets compilados desde node_builder (ajusta ruta según tu build)
 COPY --from=node_builder /app/public ./public
 
-# Permisos
+# Permisos (ajusta según tu entorno)
 RUN chown -R www-data:www-data /var/www/html \
     && chmod -R 755 /var/www/html/storage /var/www/html/bootstrap/cache || true
 
