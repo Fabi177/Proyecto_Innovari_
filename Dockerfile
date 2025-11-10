@@ -1,42 +1,35 @@
-FROM php:8.2-apache
+# Etapa de build (composer)
+FROM composer:2 AS vendor
+WORKDIR /app
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
 
-# Instalar dependencias básicas
-RUN apt-get update && apt-get install -y \
-    libpng-dev \
-    libxml2-dev \
-    zip \
-    unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# Instalar extensiones PHP básicas
-RUN docker-php-ext-install pdo pdo_mysql
-
-# Copiar Composer
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
-
-# Copiar código
-WORKDIR /var/www/html
+# Etapa opcional de assets (si usas npm/vite)
+FROM node:18 AS node_builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
+RUN npm run build || true
 
-# Instalar dependencias
-RUN composer install --no-dev --optimize-autoloader
+# Etapa runtime (php-fpm)
+FROM php:8.1-fpm
+WORKDIR /var/www/html
 
-# Configurar Apache para Laravel
-ENV APACHE_DOCUMENT_ROOT /var/www/html/public
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf
+# Dependencias del sistema
+RUN apt-get update && apt-get install -y libzip-dev zip unzip git libpng-dev libxml2-dev \
+    && docker-php-ext-install pdo pdo_mysql zip
 
-# Habilitar mod_rewrite
-RUN a2enmod rewrite
+# Copiar código y vendor
+COPY --from=vendor /app /var/www/html
+COPY . /var/www/html
 
-# Permisos básicos
-RUN chown -R www-data:www-data /var/www/html
+# Copiar assets si se compilaron
+COPY --from=node_builder /app/public/build /var/www/html/public/build || true
 
-# Permisos específicos para Laravel
-RUN chmod -R 775 /var/www/html/storage
-RUN chmod -R 775 /var/www/html/bootstrap/cache
+# Permisos
+RUN chown -R www-data:www-data /var/www/html && \
+    chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache || true
 
-# Puerto
-EXPOSE 80
-
-# Iniciar Apache
-CMD ["apache2-foreground"]
+EXPOSE 9000
+CMD ["php-fpm"]
