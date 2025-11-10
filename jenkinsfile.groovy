@@ -33,36 +33,33 @@ command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
 
     stage('Detect / validate account & names') {
       steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
-          sh '''
-set -eu
-# If ACCOUNT_ID parameter is placeholder or empty, try to detect from credentials
-INPUT_ACC="${ACCOUNT_ID:-}"
-if [ -z "$INPUT_ACC" ] || [ "$INPUT_ACC" = "TU_ACCOUNT_ID" ]; then
-  echo "Detectando AWS Account con aws sts..."
-  DETECTED_ACC=$(aws sts get-caller-identity --query Account --output text --region ${AWS_REGION} 2>/dev/null || true)
-  if [ -z "$DETECTED_ACC" ]; then
-    echo "ERROR: no se pudo detectar ACCOUNT_ID. Especificalo en parametros del build."
-    exit 1
-  fi
-  ACCOUNT_ID="$DETECTED_ACC"
-else
-  ACCOUNT_ID="$INPUT_ACC"
-fi
+        script {
+          // Use Jenkins AWS credentials binding to allow aws sts call from Groovy shell
+          withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
+            // Determine ACCOUNT_ID
+            def inputAcc = params.ACCOUNT_ID?.trim()
+            def acc = inputAcc
+            if (!acc || acc == 'TU_ACCOUNT_ID') {
+              echo "Attempting to detect AWS Account ID using provided AWS credentials..."
+              def detected = sh(script: "aws sts get-caller-identity --query Account --output text --region ${params.AWS_REGION}", returnStdout: true).trim()
+              if (!detected) {
+                error "ERROR: could not detect AWS Account ID. Provide ACCOUNT_ID as build parameter."
+              }
+              acc = detected
+            }
+            // Validate numeric
+            if (acc ==~ /.*[A-Za-z].*/) {
+              error "ERROR: ACCOUNT_ID must be numeric (12 digits). Current value contains letters: '${acc}'"
+            }
+            // Lowercase repo name
+            def repoLower = (params.ECR_REPO ?: 'nginx-ecs-demo').toLowerCase()
 
-# Lowercase repo name
-ECR_REPO_LOWER=$(echo "${ECR_REPO}" | tr 'A-Z' 'a-z')
+            // Export into env for later shell stages
+            env.ACCOUNT_ID = acc
+            env.ECR_REPO_LOWER = repoLower
 
-# Validate account numeric
-if echo "$ACCOUNT_ID" | grep -q '[^0-9]'; then
-  echo "ERROR: ACCOUNT_ID debe ser numérico. Valor: $ACCOUNT_ID"
-  exit 1
-fi
-
-echo "Usando ACCOUNT_ID=$ACCOUNT_ID, REGION=${AWS_REGION}, ECR_REPO=${ECR_REPO_LOWER}"
-# export for next stages
-export ACCOUNT_ID ECR_REPO_LOWER
-'''
+            echo "Using ACCOUNT_ID=${env.ACCOUNT_ID}, REGION=${params.AWS_REGION}, ECR_REPO=${env.ECR_REPO_LOWER}"
+          }
         }
       }
     }
@@ -83,12 +80,9 @@ docker build -t "${ECR_FULL}:${IMAGE_TAG}" .
           sh '''
 set -eu
 ECR_REG="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-# create repository if not exists (no falla si ya existe)
 aws ecr describe-repositories --repository-names "${ECR_REPO_LOWER}" --region ${AWS_REGION} >/dev/null 2>&1 || \
   aws ecr create-repository --repository-name "${ECR_REPO_LOWER}" --region ${AWS_REGION}
-# login
 aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REG}
-# push
 docker push "${ECR_REG}/${ECR_REPO_LOWER}:${IMAGE_TAG}"
 '''
         }
@@ -102,11 +96,9 @@ docker push "${ECR_REG}/${ECR_REPO_LOWER}:${IMAGE_TAG}"
 set -eu
 ECR_IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_LOWER}:${IMAGE_TAG}"
 
-# Get latest task definition arn for family
 LATEST_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text || echo "")
-
 if [ -z "$LATEST_TD_ARN" ] || [ "$LATEST_TD_ARN" = "None" ]; then
-  echo "No existe task definition previa. Registrando una definición mínima dinámica..."
+  echo "No existing task definition: registering a minimal generated task definition..."
   cat > generated-td.json <<EOF
 {
   "family": "${TASK_FAMILY}",
@@ -128,15 +120,14 @@ if [ -z "$LATEST_TD_ARN" ] || [ "$LATEST_TD_ARN" = "None" ]; then
 EOF
   aws ecs register-task-definition --cli-input-json file://generated-td.json --region ${AWS_REGION}
 else
-  echo "Actualizando la última task definition $LATEST_TD_ARN con la nueva imagen..."
+  echo "Updating last task definition $LATEST_TD_ARN with new image..."
   aws ecs describe-task-definition --task-definition $LATEST_TD_ARN --region ${AWS_REGION} --query 'taskDefinition' --output json > td.json
   cat td.json | jq --arg img "$ECR_IMAGE" 'del(.status, .revision, .taskDefinitionArn, .requiresAttributes, .compatibilities) | .containerDefinitions[0].image=$img' > new-td.json
   aws ecs register-task-definition --cli-input-json file://new-td.json --region ${AWS_REGION}
 fi
 
-# Get newest registered TD ARN and update service
 NEW_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text)
-echo "Nueva task definition: $NEW_TD_ARN"
+echo "New task definition: $NEW_TD_ARN"
 aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_SERVICE} --task-definition "$NEW_TD_ARN" --region ${AWS_REGION}
 aws ecs wait services-stable --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION}
 '''
