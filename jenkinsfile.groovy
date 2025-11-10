@@ -19,7 +19,7 @@ pipeline {
     stage('Prerequisites check') {
       steps {
         sh '''
-set -euo pipefail
+set -eu
 command -v docker >/dev/null 2>&1 || { echo "docker not found"; exit 1; }
 command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
@@ -44,7 +44,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
       steps {
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
           sh '''
-set -euo pipefail
+set -eu
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 aws ecr describe-repositories --repository-names "${ECR_REPO}" --region ${AWS_REGION} >/dev/null 2>&1 || aws ecr create-repository --repository-name "${ECR_REPO}" --region ${AWS_REGION}
 aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
@@ -57,8 +57,9 @@ aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS 
       steps {
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
           sh '''
-set -euo pipefail
+set -eu
 ECR_FULL="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_FULL}:${IMAGE_TAG} || true
 docker push ${ECR_FULL}:${IMAGE_TAG}
 '''
         }
@@ -69,7 +70,7 @@ docker push ${ECR_FULL}:${IMAGE_TAG}
       steps {
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
           sh '''
-set -euo pipefail
+set -eu
 ECR_IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
 LATEST_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text || echo "")
 if [ -z "$LATEST_TD_ARN" ] || [ "$LATEST_TD_ARN" = "None" ]; then
