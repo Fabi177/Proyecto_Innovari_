@@ -2,13 +2,13 @@ pipeline {
   agent any
 
   parameters {
-    string(name: 'AWS_REGION', defaultValue: 'sa-east-1')
-    string(name: 'ACCOUNT_ID', defaultValue: 'TU_ACCOUNT_ID')
-    string(name: 'ECR_REPO', defaultValue: 'nginx-ecs-demo')
-    string(name: 'ECS_CLUSTER', defaultValue: 'ecs-lab-cluster')
-    string(name: 'ECS_SERVICE', defaultValue: 'nginx-lab-svc')
-    string(name: 'TASK_FAMILY', defaultValue: 'nginx-lab-task')
-    string(name: 'AWS_CREDENTIALS_ID', defaultValue: '373229397038')
+    string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'Región AWS (por defecto us-east-1)')
+    string(name: 'ACCOUNT_ID', defaultValue: 'TU_ACCOUNT_ID', description: 'ID de cuenta AWS')
+    string(name: 'ECR_REPO', defaultValue: 'nginx-ecs-demo', description: 'Nombre del repo ECR')
+    string(name: 'ECS_CLUSTER', defaultValue: 'ecs-lab-cluster', description: 'Nombre del cluster ECS')
+    string(name: 'ECS_SERVICE', defaultValue: 'nginx-lab-svc', description: 'Nombre del service ECS')
+    string(name: 'TASK_FAMILY', defaultValue: 'nginx-lab-task', description: 'Family de la task definition')
+    string(name: 'AWS_CREDENTIALS_ID', defaultValue: '373229397038', description: 'ID de credencial AWS en Jenkins')
   }
 
   environment {
@@ -46,10 +46,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
           sh '''
 set -euo pipefail
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-# Crear repo si no existe
-aws ecr describe-repositories --repository-names "${ECR_REPO}" --region ${AWS_REGION} >/dev/null 2>&1 || \
-  aws ecr create-repository --repository-name "${ECR_REPO}" --region ${AWS_REGION}
-# Login Docker en ECR
+aws ecr describe-repositories --repository-names "${ECR_REPO}" --region ${AWS_REGION} >/dev/null 2>&1 || aws ecr create-repository --repository-name "${ECR_REPO}" --region ${AWS_REGION}
 aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
 '''
         }
@@ -74,7 +71,6 @@ docker push ${ECR_FULL}:${IMAGE_TAG}
           sh '''
 set -euo pipefail
 ECR_IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
-# Buscar última task definition de la family
 LATEST_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text || echo "")
 if [ -z "$LATEST_TD_ARN" ] || [ "$LATEST_TD_ARN" = "None" ]; then
   if [ -f task-definition.json ]; then
@@ -91,7 +87,6 @@ else
   aws ecs register-task-definition --cli-input-json file://new-td.json --region ${AWS_REGION}
 fi
 
-# Obtener la nueva task definition ARN
 NEW_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text)
 aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_SERVICE} --task-definition $NEW_TD_ARN --region ${AWS_REGION}
 aws ecs wait services-stable --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION}
