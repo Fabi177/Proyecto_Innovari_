@@ -1,4 +1,3 @@
- url=https://github.com/Fabi177/Proyecto_Innovari_/blob/main/jenkinsfile.groovy
 pipeline {
   agent any
 
@@ -8,7 +7,6 @@ pipeline {
     string(name: 'ECR_REPO', defaultValue: 'innovari-laravel', description: 'ECR repository name')
     string(name: 'CLUSTER_NAME', defaultValue: 'innovari-cluster', description: 'ECS cluster name')
     string(name: 'SERVICE_NAME', defaultValue: 'innovari-service', description: 'ECS service name to update')
-    string(name: 'TASK_FAMILY', defaultValue: 'innovari-task', description: 'Task definition family name')
     string(name: 'CONTAINER_NAME', defaultValue: 'innovari-container', description: 'Container name inside task definition to patch image for')
     booleanParam(name: 'FORCE_NEW_DEPLOY', defaultValue: true, description: 'Force a new deployment after registering task definition')
   }
@@ -18,7 +16,6 @@ pipeline {
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         checkout scm
@@ -26,7 +23,6 @@ pipeline {
           def GIT_COMMIT_SHORT = sh(script: "git rev-parse --short=7 HEAD", returnStdout: true).trim()
           def tagSuffix = "${env.BUILD_NUMBER ?: 'local'}-${GIT_COMMIT_SHORT}"
           def IMAGE_TAG = "${params.ECR_REPO}:${tagSuffix}"
-          // export for later
           env.IMAGE_TAG = IMAGE_TAG
           echo "Image tag will be: ${env.IMAGE_TAG}"
           if (!params.AWS_ACCOUNT_ID?.trim()) {
@@ -114,7 +110,6 @@ pipeline {
         }
       }
     }
-
   }
 
   post {
