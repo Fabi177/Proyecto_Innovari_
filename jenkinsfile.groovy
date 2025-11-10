@@ -3,8 +3,8 @@ pipeline {
 
   parameters {
     string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'Región AWS (por defecto us-east-1)')
-    string(name: 'ACCOUNT_ID', defaultValue: 'TU_ACCOUNT_ID', description: 'ID de cuenta AWS')
-    string(name: 'ECR_REPO', defaultValue: 'nginx-ecs-demo', description: 'Nombre del repo ECR')
+    string(name: 'ACCOUNT_ID', defaultValue: 'TU_ACCOUNT_ID', description: 'ID de cuenta AWS (debe ser numérico)')
+    string(name: 'ECR_REPO', defaultValue: 'nginx-ecs-demo', description: 'Nombre del repo ECR (lowercase recommended)')
     string(name: 'ECS_CLUSTER', defaultValue: 'ecs-lab-cluster', description: 'Nombre del cluster ECS')
     string(name: 'ECS_SERVICE', defaultValue: 'nginx-lab-svc', description: 'Nombre del service ECS')
     string(name: 'TASK_FAMILY', defaultValue: 'nginx-lab-task', description: 'Family de la task definition')
@@ -31,10 +31,37 @@ command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
       steps { checkout scm }
     }
 
+    stage('Prepare names & validate') {
+      steps {
+        script {
+          // sanitize and lowercase
+          def accRaw = params.ACCOUNT_ID?.trim()
+          def repoRaw = params.ECR_REPO?.trim()
+          def acc = accRaw?.toLowerCase()
+          def repo = repoRaw?.toLowerCase()
+
+          if (!acc || acc == 'tu_account_id') {
+            error "ERROR: set a real ACCOUNT_ID (your 12-digit AWS account id) in build parameters; currently: '${params.ACCOUNT_ID}'"
+          }
+          if (acc ==~ /.*[a-zA-Z].*/ ) {
+            error "ERROR: ACCOUNT_ID must be numeric (12 digits). Current value contains letters: '${params.ACCOUNT_ID}'"
+          }
+          if (!repo) {
+            error "ERROR: set ECR_REPO parameter"
+          }
+
+          // expose to shell steps via env vars
+          env.ECR_ACCOUNT = acc
+          env.ECR_REPO_NAME = repo
+          echo "Using account: ${env.ECR_ACCOUNT}, repo: ${env.ECR_REPO_NAME}, region: ${params.AWS_REGION}"
+        }
+      }
+    }
+
     stage('Build image') {
       steps {
         script {
-          def ecrFull = "${params.ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com/${params.ECR_REPO}"
+          def ecrFull = "${env.ECR_ACCOUNT}.dkr.ecr.${params.AWS_REGION}.amazonaws.com/${env.ECR_REPO_NAME}"
           sh "docker build -t ${ecrFull}:${IMAGE_TAG} ."
         }
       }
@@ -45,8 +72,11 @@ command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
           sh '''
 set -eu
-ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-aws ecr describe-repositories --repository-names "${ECR_REPO}" --region ${AWS_REGION} >/dev/null 2>&1 || aws ecr create-repository --repository-name "${ECR_REPO}" --region ${AWS_REGION}
+ECR_REGISTRY="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+# Crear repo si no existe
+aws ecr describe-repositories --repository-names "${ECR_REPO_NAME}" --region ${AWS_REGION} >/dev/null 2>&1 || \
+  aws ecr create-repository --repository-name "${ECR_REPO_NAME}" --region ${AWS_REGION}
+# Login Docker en ECR
 aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
 '''
         }
@@ -58,8 +88,7 @@ aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS 
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
           sh '''
 set -eu
-ECR_FULL="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
-docker tag ${ECR_REPO}:${IMAGE_TAG} ${ECR_FULL}:${IMAGE_TAG} || true
+ECR_FULL="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
 docker push ${ECR_FULL}:${IMAGE_TAG}
 '''
         }
@@ -71,11 +100,11 @@ docker push ${ECR_FULL}:${IMAGE_TAG}
         withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
           sh '''
 set -eu
-ECR_IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+ECR_IMAGE="${ECR_ACCOUNT}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:${IMAGE_TAG}"
 LATEST_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text || echo "")
 if [ -z "$LATEST_TD_ARN" ] || [ "$LATEST_TD_ARN" = "None" ]; then
   if [ -f task-definition.json ]; then
-    jq --arg img "$ECR_IMAGE" --arg acc "$ACCOUNT_ID" --arg reg "$AWS_REGION" \
+    jq --arg img "$ECR_IMAGE" --arg acc "$ECR_ACCOUNT" --arg reg "$AWS_REGION" \
       '.containerDefinitions[0].image=$img | .executionRoleArn="arn:aws:iam::"+$acc+":role/ecsTaskExecutionRole" | .taskRoleArn="arn:aws:iam::"+$acc+":role/ecsTaskRole"' \
       task-definition.json > td-for-register.json
     aws ecs register-task-definition --cli-input-json file://td-for-register.json --region ${AWS_REGION}
