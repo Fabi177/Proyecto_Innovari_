@@ -34,6 +34,8 @@ pipeline {
                             env.ACCOUNT_ID = params.ACCOUNT_ID
                         }
                         env.ECR_URI = "${env.ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com/${params.ECR_REPO}"
+                        // calcular host del registry (sin path) para usar en docker login
+                        env.ECR_HOST = env.ECR_URI.split('/')[0]
                     }
                 }
             }
@@ -57,7 +59,7 @@ pipeline {
                 withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-credentials']]) {
                     sh """
                         aws ecr get-login-password --region ${params.AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${env.ECR_URI%/*}
+                        docker login --username AWS --password-stdin ${env.ECR_HOST}
                     """
                 }
             }
