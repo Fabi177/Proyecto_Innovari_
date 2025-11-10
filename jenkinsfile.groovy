@@ -2,126 +2,107 @@ pipeline {
   agent any
 
   parameters {
-    string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS region for ECR/ECS')
-    string(name: 'AWS_ACCOUNT_ID', defaultValue: '', description: 'AWS account id (e.g. 123456789012)')
-    string(name: 'ECR_REPO', defaultValue: 'innovari-laravel', description: 'ECR repository name')
-    string(name: 'CLUSTER_NAME', defaultValue: 'innovari-cluster', description: 'ECS cluster name')
-    string(name: 'SERVICE_NAME', defaultValue: 'innovari-service', description: 'ECS service name to update')
-    string(name: 'CONTAINER_NAME', defaultValue: 'innovari-container', description: 'Container name inside task definition to patch image for')
-    booleanParam(name: 'FORCE_NEW_DEPLOY', defaultValue: true, description: 'Force a new deployment after registering task definition')
+    string(name: 'AWS_REGION', defaultValue: 'sa-east-1')
+    string(name: 'ACCOUNT_ID', defaultValue: 'TU_ACCOUNT_ID')
+    string(name: 'ECR_REPO', defaultValue: 'nginx-ecs-demo')
+    string(name: 'ECS_CLUSTER', defaultValue: 'ecs-lab-cluster')
+    string(name: 'ECS_SERVICE', defaultValue: 'nginx-lab-svc')
+    string(name: 'TASK_FAMILY', defaultValue: 'nginx-lab-task')
+    string(name: 'AWS_CREDENTIALS_ID', defaultValue: '373229397038')
   }
 
   environment {
-    AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+    IMAGE_TAG = "${env.BUILD_NUMBER}"
   }
 
   stages {
+    stage('Prerequisites check') {
+      steps {
+        sh '''
+set -euo pipefail
+command -v docker >/dev/null 2>&1 || { echo "docker not found"; exit 1; }
+command -v aws >/dev/null 2>&1 || { echo "aws cli not found"; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "jq not found"; exit 1; }
+'''
+      }
+    }
+
     stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Build image') {
       steps {
-        checkout scm
         script {
-          def GIT_COMMIT_SHORT = sh(script: "git rev-parse --short=7 HEAD", returnStdout: true).trim()
-          def tagSuffix = "${env.BUILD_NUMBER ?: 'local'}-${GIT_COMMIT_SHORT}"
-          def IMAGE_TAG = "${params.ECR_REPO}:${tagSuffix}"
-          env.IMAGE_TAG = IMAGE_TAG
-          echo "Image tag will be: ${env.IMAGE_TAG}"
-          if (!params.AWS_ACCOUNT_ID?.trim()) {
-            echo "Warning: AWS_ACCOUNT_ID is empty — set it in job parameters to push to your account."
-          }
+          def ecrFull = "${params.ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com/${params.ECR_REPO}"
+          sh "docker build -t ${ecrFull}:${IMAGE_TAG} ."
         }
       }
     }
 
-    stage('Build Docker Image') {
+    stage('ECR: ensure repo & login') {
       steps {
-        script {
-          echo "Building docker image ${env.IMAGE_TAG}..."
-          sh "docker build -t ${env.IMAGE_TAG} ."
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
+          sh '''
+set -euo pipefail
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+# Crear repo si no existe
+aws ecr describe-repositories --repository-names "${ECR_REPO}" --region ${AWS_REGION} >/dev/null 2>&1 || \
+  aws ecr create-repository --repository-name "${ECR_REPO}" --region ${AWS_REGION}
+# Login Docker en ECR
+aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+'''
         }
       }
     }
 
-    stage('Login to AWS ECR') {
+    stage('Push to ECR') {
       steps {
-        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
-          script {
-            if (!params.AWS_ACCOUNT_ID?.trim()) {
-              error "AWS_ACCOUNT_ID parameter is required for ECR login"
-            }
-            env.ECR_REGISTRY = "${params.AWS_ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com"
-            echo "Logging in to ECR: ${env.ECR_REGISTRY}"
-            sh "aws --version || true"
-            sh "aws ecr get-login-password --region ${params.AWS_REGION} | docker login --username AWS --password-stdin ${env.ECR_REGISTRY}"
-          }
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
+          sh '''
+set -euo pipefail
+ECR_FULL="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+docker push ${ECR_FULL}:${IMAGE_TAG}
+'''
         }
       }
     }
 
-    stage('Tag & Push to ECR') {
+    stage('Register task definition and update service') {
       steps {
-        script {
-          def fullImage = "${env.ECR_REGISTRY}/${env.IMAGE_TAG}"
-          echo "Tagging image ${env.IMAGE_TAG} as ${fullImage}"
-          sh "docker tag ${env.IMAGE_TAG} ${fullImage}"
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${params.AWS_CREDENTIALS_ID}"]]) {
+          sh '''
+set -euo pipefail
+ECR_IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${IMAGE_TAG}"
+# Buscar última task definition de la family
+LATEST_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text || echo "")
+if [ -z "$LATEST_TD_ARN" ] || [ "$LATEST_TD_ARN" = "None" ]; then
+  if [ -f task-definition.json ]; then
+    jq --arg img "$ECR_IMAGE" --arg acc "$ACCOUNT_ID" --arg reg "$AWS_REGION" \
+      '.containerDefinitions[0].image=$img | .executionRoleArn="arn:aws:iam::"+$acc+":role/ecsTaskExecutionRole" | .taskRoleArn="arn:aws:iam::"+$acc+":role/ecsTaskRole"' \
+      task-definition.json > td-for-register.json
+    aws ecs register-task-definition --cli-input-json file://td-for-register.json --region ${AWS_REGION}
+  else
+    echo "ERROR: task-definition.json not found and no existing task definition"; exit 1
+  fi
+else
+  aws ecs describe-task-definition --task-definition $LATEST_TD_ARN --region ${AWS_REGION} --query 'taskDefinition' --output json > td.json
+  cat td.json | jq --arg img "$ECR_IMAGE" 'del(.status, .revision, .taskDefinitionArn, .requiresAttributes, .compatibilities) | .containerDefinitions[0].image=$img' > new-td.json
+  aws ecs register-task-definition --cli-input-json file://new-td.json --region ${AWS_REGION}
+fi
 
-          echo "Ensuring ECR repository ${params.ECR_REPO} exists..."
-          sh """
-            set -e
-            aws ecr describe-repositories --repository-names ${params.ECR_REPO} --region ${params.AWS_REGION} >/dev/null 2>&1 || \
-            aws ecr create-repository --repository-name ${params.ECR_REPO} --region ${params.AWS_REGION} >/dev/null
-          """
-
-          echo "Pushing ${fullImage} to ECR..."
-          sh "docker push ${fullImage}"
-
-          env.IMAGE_URI = "${fullImage}"
-        }
-      }
-    }
-
-    stage('Register Task Definition & Deploy') {
-      steps {
-        script {
-          if (!fileExists('task-def.json')) {
-            error "task-def.json not found in repo root. Add a template task-def.json with a container named ${params.CONTAINER_NAME}."
-          }
-
-          echo "Patching task-def.json with image ${env.IMAGE_URI}"
-          sh """
-            set -e
-            jq --arg IMG "${env.IMAGE_URI}" --arg CN "${params.CONTAINER_NAME}" '
-              (.containerDefinitions[] | select(.name == $CN) ).image = $IMG
-            ' task-def.json > task-def-updated.json
-          """
-
-          echo "Registering task definition..."
-          sh "aws ecs register-task-definition --cli-input-json file://task-def-updated.json --region ${params.AWS_REGION}"
-
-          if (params.FORCE_NEW_DEPLOY) {
-            echo "Updating service ${params.SERVICE_NAME} in cluster ${params.CLUSTER_NAME}"
-            sh """
-              aws ecs update-service \
-                --cluster ${params.CLUSTER_NAME} \
-                --service ${params.SERVICE_NAME} \
-                --force-new-deployment \
-                --region ${params.AWS_REGION}
-            """
-          }
+# Obtener la nueva task definition ARN
+NEW_TD_ARN=$(aws ecs list-task-definitions --family-prefix ${TASK_FAMILY} --status ACTIVE --sort DESC --region ${AWS_REGION} --query 'taskDefinitionArns[0]' --output text)
+aws ecs update-service --cluster ${ECS_CLUSTER} --service ${ECS_SERVICE} --task-definition $NEW_TD_ARN --region ${AWS_REGION}
+aws ecs wait services-stable --cluster ${ECS_CLUSTER} --services ${ECS_SERVICE} --region ${AWS_REGION}
+'''
         }
       }
     }
   }
 
   post {
-    success {
-      echo "SUCCESS: Image pushed to ECR: ${env.IMAGE_URI ?: 'N/A'}"
-    }
-    failure {
-      echo "Pipeline FAILED - check logs"
-    }
-    always {
-      sh "docker images -f dangling=true -q | xargs -r docker rmi -f || true"
-      sh "rm -f task-def-updated.json || true"
-    }
+    success { echo "PIPELINE OK" }
+    failure { echo "PIPELINE FAIL" }
   }
 }
