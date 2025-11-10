@@ -31,8 +31,12 @@ RUN a2enmod rewrite
 # Permisos básicos
 RUN chown -R www-data:www-data /var/www/html
 
+# Permisos específicos para Laravel
+RUN chmod -R 775 /var/www/html/storage
+RUN chmod -R 775 /var/www/html/bootstrap/cache
+
 # Puerto
 EXPOSE 80
 
-# Iniciar
+# Iniciar Apache
 CMD ["apache2-foreground"]
